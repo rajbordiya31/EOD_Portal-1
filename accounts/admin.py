@@ -48,3 +48,9 @@ class UserAdmin(BaseUserAdmin):
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         return qs.select_related('manager')
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        """Customize the manager dropdown to only show active managers"""
+        if db_field.name == "manager":
+            kwargs["queryset"] = User.objects.filter(role='MANAGER', is_active=True).order_by('first_name', 'last_name')
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
