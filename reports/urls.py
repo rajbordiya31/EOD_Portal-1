@@ -18,5 +18,6 @@ urlpatterns = [
 
     # Manager views
     path('manager/', views.manager_dashboard_view, name='manager_dashboard'),
+    path('manager/export/', views.export_reports_excel, name='export_reports_excel'),
     path('review/<int:pk>/', views.review_report_view, name='review_report'),
 ]
