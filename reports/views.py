@@ -3,7 +3,12 @@ from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.utils import timezone
 from django.db.models import Q, Count, Avg
+from django.http import HttpResponse
 from datetime import timedelta
+import re
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 from .models import EODReport, ReportReview
 from .forms import EODReportForm, ReportReviewForm, EODReportFilterForm
 from .utils import get_week_date_range, is_weekend, get_week_display
@@ -397,3 +402,154 @@ def my_reports_view(request):
         'filter_form': filter_form,
     }
     return render(request, 'reports/my_reports.html', context)
+
+
+@login_required
+def export_reports_excel(request):
+    """Export filtered reports to Excel for managers"""
+    if not (request.user.is_manager() or request.user.is_admin_user()):
+        messages.error(request, 'You do not have permission to export reports.')
+        return redirect('reports:employee_dashboard')
+
+    # Get team members' reports (same logic as manager dashboard)
+    if request.user.is_admin_user():
+        reports = EODReport.objects.all()
+    else:
+        team_members = request.user.get_team_members()
+        reports = EODReport.objects.filter(employee__in=team_members)
+
+    # Apply filters (same as manager dashboard)
+    filter_form = EODReportFilterForm(request.GET)
+    if filter_form.is_valid():
+        date_from = filter_form.cleaned_data.get('date_from')
+        date_to = filter_form.cleaned_data.get('date_to')
+        status = filter_form.cleaned_data.get('status')
+        employee = filter_form.cleaned_data.get('employee')
+
+        if date_from:
+            reports = reports.filter(report_date__gte=date_from)
+        if date_to:
+            reports = reports.filter(report_date__lte=date_to)
+        if status:
+            reports = reports.filter(status=status)
+        if employee:
+            reports = reports.filter(
+                Q(employee__first_name__icontains=employee) |
+                Q(employee__last_name__icontains=employee) |
+                Q(employee__username__icontains=employee)
+            )
+
+    # Remove the limit for export (get all matching reports, not just 50)
+    reports = reports.select_related('employee').order_by('-report_date', '-submitted_at')
+
+    # Create Excel workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "EOD Reports"
+
+    # Define headers
+    headers = [
+        'Employee Name',
+        'Department',
+        'Report Date',
+        'Project Name',
+        'Tasks Completed',
+        'Hours Worked',
+        'Blockers/Issues',
+        'Next Day Plan',
+        'Status',
+        'Resubmission Count',
+        'Submitted At',
+        'Last Review Comments'
+    ]
+
+    # Style for header row
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Write headers
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.value = header
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+
+    # Helper function to strip HTML tags
+    def strip_html(text):
+        """Remove HTML tags from text"""
+        if not text:
+            return ''
+        clean = re.compile('<.*?>')
+        return re.sub(clean, '', str(text)).strip()
+
+    # Style for status cells
+    status_fills = {
+        'APPROVED': PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+        'PENDING': PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+        'REJECTED': PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+    }
+
+    # Write data rows
+    for row_num, report in enumerate(reports, 2):
+        # Get last review comments if any
+        last_review = report.reviews.order_by('-reviewed_at').first()
+        review_comments = last_review.comments if last_review else 'No review yet'
+
+        # Prepare row data
+        row_data = [
+            report.employee.get_full_name() or report.employee.username,
+            report.employee.department or 'N/A',
+            report.report_date.strftime('%Y-%m-%d'),
+            report.project_name,
+            strip_html(report.tasks_completed),
+            float(report.hours_worked),
+            strip_html(report.blockers_issues) if report.blockers_issues else 'None',
+            strip_html(report.next_day_plan),
+            report.get_status_display(),
+            report.resubmission_count,
+            report.submitted_at.strftime('%Y-%m-%d %H:%M'),
+            strip_html(review_comments)
+        ]
+
+        # Write row
+        for col_num, value in enumerate(row_data, 1):
+            cell = ws.cell(row=row_num, column=col_num)
+            cell.value = value
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+            # Apply status color
+            if col_num == 9:  # Status column
+                cell.fill = status_fills.get(report.status, PatternFill())
+
+    # Auto-size columns
+    for col_num in range(1, len(headers) + 1):
+        column_letter = get_column_letter(col_num)
+        max_length = 0
+        for cell in ws[column_letter]:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        # Set width (with limits)
+        adjusted_width = min(max_length + 2, 50)
+        ws.column_dimensions[column_letter].width = max(adjusted_width, 12)
+
+    # Freeze header row
+    ws.freeze_panes = 'A2'
+
+    # Prepare response
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+    # Generate filename with current date
+    filename = f'EOD_Reports_{timezone.now().strftime("%Y-%m-%d")}.xlsx'
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+    # Save workbook to response
+    wb.save(response)
+
+    return response
