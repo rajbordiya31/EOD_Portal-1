@@ -112,7 +112,7 @@ DATABASES = {
         'USER': config('DB_USER', default='eod_user'),
         'PASSWORD': config('DB_PASSWORD', default='eod_password123'),
         'HOST': config('DB_HOST', default='localhost'),
-        'PORT': config('DB_PORT', default='5432'),
+        'PORT': config('DB_PORT', default='5433'),
     }
 }
 
